@@ -1,0 +1,1274 @@
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+
+const JOURNAL_TYPES = [
+  { id:"stream",    label:"Morning Pages", icon:"✦", desc:"Free-flowing thoughts",  color:"#7c9a8e" },
+  { id:"gratitude", label:"Gratitude",     icon:"◇", desc:"Daily thankfulness",     color:"#c4956a" },
+  { id:"bullet",    label:"Bullet Journal",icon:"◉", desc:"Plans & tracking",       color:"#7a8fad" },
+  { id:"dream",     label:"Dream Journal", icon:"◌", desc:"Nightly visions",        color:"#9b8ec4" },
+  { id:"travel",    label:"Travel",        icon:"△", desc:"Places & memories",      color:"#7aaa8e" },
+  { id:"food",      label:"Food Journal",  icon:"○", desc:"Meals & mood",           color:"#c4956a" },
+  { id:"art",       label:"Art Journal",   icon:"◈", desc:"Sketches & images",      color:"#c47a7a" },
+  { id:"sketch",    label:"Free Sketch",   icon:"✏", desc:"Draw without limits",    color:"#8a9a7c" },
+];
+
+const SKETCH_TOOLS  = ["pen","brush","pencil","eraser","fill"];
+const PALETTE       = ["#c4a882","#c47a7a","#7c9a8e","#7a8fad","#9b8ec4","#c4956a","#8a9a7c","#d4c5a9","#3d3530","#1e1a16","#f5f0e8"];
+const SLEEP_QUALITY = ["☽ Poor","☽☽ Fair","☽☽☽ Good","☽☽☽☽ Deep"];
+const MOODS = [
+  { id:"ecstatic", label:"Ecstatic", color:"#c4956a" },
+  { id:"happy",    label:"Happy",    color:"#7c9a8e" },
+  { id:"calm",     label:"Calm",     color:"#7a8fad" },
+  { id:"meh",      label:"Meh",      color:"#a09080" },
+  { id:"anxious",  label:"Anxious",  color:"#c4b87a" },
+  { id:"sad",      label:"Sad",      color:"#9b8ec4" },
+  { id:"angry",    label:"Angry",    color:"#c47a7a" },
+];
+const PROMPTS = {
+  stream:    ["What's weighing on you right now?","Start with the weather inside your head.","What would you tell your past self today?","What do you want to remember about this moment?","Where do your thoughts keep returning to?"],
+  gratitude: ["What almost went unnoticed today?","Name one small thing that made you feel held.","Who quietly made your day easier?","What did your body do today that you're grateful for?","What ordinary moment felt secretly beautiful?"],
+  dream:     ["What feelings lingered when you woke?","Was there a symbol or image that stayed with you?","Who appeared in your dream, and why might they?","What did the light look like in your dream?","What emotion did you feel most intensely?"],
+  travel:    ["What surprised you about this place?","Describe one sound you'll remember.","What did you eat, and how did it taste?","What did you notice that tourists miss?","What does this place smell like?"],
+  food:      ["How did the first bite feel?","What memories does this meal bring up?","Who would you share this dish with?","What would you change next time?","Describe the texture in one sentence."],
+  bullet:    ["What's the one thing that would make today a win?","What are you avoiding that needs doing?","What did yesterday teach you?","What can you let go of today?","What are you most looking forward to?"],
+  art:       ["What emotion drove this piece?","What are you trying to say that words can't?","What surprised you in the process?","What would you do differently?","What does this work mean to you right now?"],
+  sketch:    ["What are you feeling in your hands today?","What shape keeps appearing in your mind?","Draw what you can't say out loud.","What texture do you want to explore?","Let your hand move without thinking."],
+};
+
+const STORAGE_KEY = "mylov_journals";
+const MOODS_KEY   = "mylov_moods";
+const PREFS_KEY   = "mylov_prefs";
+
+const generateId  = () => Date.now().toString(36) + Math.random().toString(36).slice(2);
+const formatDate  = (d) => new Date(d).toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"});
+const ymd         = (d=new Date()) => new Date(d).toISOString().slice(0,10);
+const timeAgo     = (d) => { const s=Date.now()-new Date(d); if(s<60000)return "just now"; if(s<3600000)return Math.floor(s/60000)+"m ago"; if(s<86400000)return Math.floor(s/3600000)+"h ago"; return Math.floor(s/86400000)+"d ago"; };
+const wc          = (t="") => t.trim().split(/\s+/).filter(Boolean).length;
+const loadJSON    = (k,d) => { try{ const v=localStorage.getItem(k); return v?JSON.parse(v):d; }catch{ return d; } };
+const saveJSON    = (k,v) => localStorage.setItem(k,JSON.stringify(v));
+
+function calcStreak(journals) {
+  const days=new Set(journals.filter(j=>!j.archived&&j.content?.trim()).map(j=>ymd(j.updated)));
+  let streak=0, d=new Date();
+  if(!days.has(ymd(d)))d.setDate(d.getDate()-1);
+  while(days.has(ymd(d))){streak++;d.setDate(d.getDate()-1);}
+  return streak;
+}
+function calcLongestStreak(journals) {
+  const days=[...new Set(journals.filter(j=>!j.archived&&j.content?.trim()).map(j=>ymd(j.updated)))].sort();
+  let best=0,cur=0,prev=null;
+  for(const d of days){ if(prev){const gap=(new Date(d)-new Date(prev))/86400000; cur=gap===1?cur+1:1;}else cur=1; best=Math.max(best,cur); prev=d; }
+  return best;
+}
+function buildHeatmap(journals) {
+  const m={};
+  journals.filter(j=>!j.archived).forEach(j=>{const d=ymd(j.updated);m[d]=(m[d]||0)+wc(j.content);});
+  return m;
+}
+function buildWordCloud(journals) {
+  const stop=new Set(["the","a","an","and","or","but","in","on","at","to","for","of","with","i","my","me","we","is","was","it","this","that","be","been","have","had","do","did","so","as","are","were","am","very","just","also","its","their","there","then","than","more","when","from"]);
+  const freq={};
+  journals.filter(j=>j.type==="gratitude"&&!j.archived).forEach(j=>{
+    (j.content||"").toLowerCase().split(/\W+/).filter(w=>w.length>3&&!stop.has(w)).forEach(w=>{freq[w]=(freq[w]||0)+1;});
+  });
+  return Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,40).map(([word,count])=>({word,count}));
+}
+function getOnThisDay(journals) {
+  const today=new Date();
+  return journals.filter(j=>{
+    if(j.archived||!j.content?.trim())return false;
+    const d=new Date(j.created);
+    return d.getMonth()===today.getMonth()&&d.getDate()===today.getDate()&&d.getFullYear()!==today.getFullYear();
+  }).sort((a,b)=>new Date(a.created)-new Date(b.created));
+}
+function renderMarkdown(text) {
+  if(!text)return "";
+  let h=text
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/^### (.+)$/gm,"<h3>$1</h3>").replace(/^## (.+)$/gm,"<h2>$1</h2>").replace(/^# (.+)$/gm,"<h1>$1</h1>")
+    .replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>").replace(/\*(.+?)\*/g,"<em>$1</em>").replace(/`(.+?)`/g,"<code>$1</code>")
+    .replace(/^> (.+)$/gm,"<blockquote>$1</blockquote>").replace(/^- (.+)$/gm,"<li>$1</li>")
+    .replace(/(<li>.*<\/li>)/gs,"<ul>$1</ul>").replace(/\n\n/g,"</p><p>").replace(/\n/g,"<br/>");
+  return `<p>${h}</p>`;
+}
+function getDailyPrompt(type) {
+  const pool=PROMPTS[type]||PROMPTS.stream;
+  return pool[Math.floor(Date.now()/86400000)%pool.length];
+}
+function accentRgba(hex,op) {
+  const b=hex.replace("#","");
+  const r=parseInt(b.slice(0,2),16),g=parseInt(b.slice(2,4),16),bv=parseInt(b.slice(4,6),16);
+  return `rgba(${r},${g},${bv},${op})`;
+}
+
+const initialJournals=[{id:"welcome",title:"Welcome to MYLOV",type:"stream",content:"This is your sanctuary. A quiet place to think, feel, and remember.\n\nWrite freely. There are no rules here.",created:new Date().toISOString(),updated:new Date().toISOString(),archived:false,pinned:false,tags:[],meta:{}}];
+
+const dark={
+  bg:"#1a1916",sidebar:"#161513",rail:"#121210",header:"#1a1916",
+  card:"#201e1b",cardHov:"#252320",inputBg:"#252320",
+  border:"#2e2c28",borderHov:"#3d3a34",
+  text:"#e8e0d0",textSoft:"#a89880",muted:"#6a6055",
+  accent:"#9aab8c",accentAlt:"#c4956a",accentDim:"#5a6e52",
+  activeItem:"#252f22",activeBorder:"#7a9470",
+  editorBg:"#1c1a17",editorLine:"rgba(154,171,140,.06)",
+  canvasBg:"#1a1916",danger:"#b07070",
+  primBg:"#4a5e42",primHov:"#5a7050",primText:"#ddeedd",
+};
+const light={
+  bg:"#f2ede4",sidebar:"#ece6db",rail:"#e4ddd2",header:"#f2ede4",
+  card:"#f8f4ec",cardHov:"#fdf9f2",inputBg:"#ece6db",
+  border:"#d8d0c0",borderHov:"#c4baa8",
+  text:"#2a2420",textSoft:"#5a4e42",muted:"#9a8a78",
+  accent:"#7a8f6e",accentAlt:"#b07840",accentDim:"#9aab8c",
+  activeItem:"#e4edde",activeBorder:"#7a8f6e",
+  editorBg:"#faf6ee",editorLine:"rgba(122,143,110,.07)",
+  canvasBg:"#faf6ee",danger:"#a06060",
+  primBg:"#6a8060",primHov:"#7a9070",primText:"#f0f4ee",
+};
+
+const CSS=`
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,300;1,400&family=Lora:ital,wght@0,400;0,500;1,400;1,500&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500&display=swap&font-display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+html,body,#root{height:100%;}
+::selection{background:rgba(154,171,140,.3);}
+.gl ::selection{background:rgba(122,143,110,.22);}
+::-webkit-scrollbar{width:3px;height:3px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:rgba(154,171,140,.22);border-radius:2px;}
+textarea,input,select{outline:none;font-family:inherit;}
+button{cursor:pointer;font-family:inherit;border:none;outline:none;}
+a{color:inherit;text-decoration:none;}
+.ff-serif{font-family:'Cormorant Garamond',Georgia,serif;}
+.ff-lora{font-family:'Lora',Georgia,serif;}
+.ff-sans{font-family:'DM Sans',system-ui,sans-serif;}
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes slideL{from{opacity:0;transform:translateX(-10px)}to{opacity:1;transform:translateX(0)}}
+@keyframes pop{0%{transform:scale(.75)}60%{transform:scale(1.1)}100%{transform:scale(1)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes streakIn{0%{transform:scale(.4) rotate(-20deg);opacity:0}65%{transform:scale(1.18) rotate(4deg)}100%{transform:scale(1) rotate(0);opacity:1}}
+@keyframes blotOut{0%{transform:scale(0);opacity:.7}100%{transform:scale(2.8);opacity:0}}
+.jitem:hover .jact{opacity:1!important;}
+.jitem{transition:background .11s;}
+.ep{background-image:repeating-linear-gradient(transparent,transparent 31px,var(--ep) 31px,var(--ep) 32px);background-size:100% 32px;}
+.mdr{font-family:'Lora',Georgia,serif;line-height:1.9;max-width:65ch;}
+.mdr h1{font-family:'Cormorant Garamond',serif;font-size:30px;font-weight:400;margin:20px 0 10px;}
+.mdr h2{font-family:'Cormorant Garamond',serif;font-size:22px;font-weight:400;margin:16px 0 8px;}
+.mdr h3{font-family:'DM Sans',sans-serif;font-size:12px;font-weight:500;margin:14px 0 5px;letter-spacing:.07em;text-transform:uppercase;opacity:.6;}
+.mdr p{margin:9px 0;}
+.mdr strong{font-weight:600;}
+.mdr em{font-style:italic;}
+.mdr code{font-family:monospace;font-size:.87em;padding:1px 6px;border-radius:3px;background:rgba(154,171,140,.13);}
+.mdr blockquote{border-left:2px solid rgba(154,171,140,.4);padding-left:16px;margin:12px 0;opacity:.72;font-style:italic;}
+.mdr ul{padding-left:18px;margin:8px 0;}
+.mdr li{margin:3px 0;line-height:1.8;}
+.hm-cell{border-radius:2px;transition:transform .08s;}
+.hm-cell:hover{transform:scale(1.5);z-index:2;position:relative;}
+.ecard{transition:background .11s,border-color .11s;cursor:pointer;}
+.ecard:hover{background:var(--ch)!important;border-color:var(--cb)!important;}
+.focus-vignette::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;background:radial-gradient(ellipse 70% 58% at 50% 50%,transparent 36%,rgba(8,7,6,.72) 100%);}
+.gl .focus-vignette::after{background:radial-gradient(ellipse 70% 58% at 50% 50%,transparent 36%,rgba(225,215,200,.68) 100%);}
+@media(max-width:680px){.desk-side{display:none!important;}.mob-nav{display:flex!important;}.main-content{padding-bottom:66px!important;}}
+@media(min-width:681px){.mob-nav{display:none!important;}}
+`;
+
+function Btn({onClick,children,v="",style={},title,disabled,type="button"}){
+  return <button type={type} className={["mb",v,disabled?"mb-dis":""].filter(Boolean).join(" ")} onClick={disabled?undefined:onClick} title={title} style={style}>{children}</button>;
+}
+
+// We inject button + utility CSS via a style tag inside the component
+const BTN_CSS=`
+.mb{display:inline-flex;align-items:center;justify-content:center;gap:6px;border-radius:7px;padding:7px 13px;font-family:'DM Sans',system-ui,sans-serif;font-size:12px;letter-spacing:.03em;font-weight:400;cursor:pointer;border:1px solid;transition:background .13s,border-color .13s,color .13s,transform .09s;}
+.mb:hover{transform:translateY(-1px);}
+.mb:active{transform:scale(.97) translateY(0)!important;}
+.mb{background:#252320;border-color:#2e2c28;color:#a89880;}
+.mb:hover{background:#2e2c28;}
+.mb-primary{background:#4a5e42;border-color:#4a5e42;color:#ddeedd;}
+.mb-primary:hover{background:#5a7050;border-color:#5a7050;}
+.mb-ghost{background:transparent;border-color:#2e2c28;color:#6a6055;}
+.mb-ghost:hover{background:#1e1c19;color:#a89880;}
+.mb-danger{background:transparent;border-color:transparent;color:#7a6055;}
+.mb-danger:hover{background:#2a1a1a;border-color:#5a3030;color:#b07070;}
+.mb-pill{border-radius:20px!important;padding:4px 11px!important;font-size:11px!important;}
+.mb-sel{background:#252f22!important;border-color:#6a7a5e!important;color:#9aab8c!important;}
+.mb-dis{opacity:.32!important;pointer-events:none!important;}
+.mb-icon{padding:5px 7px!important;border-radius:6px!important;background:transparent!important;border-color:transparent!important;font-size:13px!important;}
+.mb-icon:hover{background:#2e2c28!important;border-color:#2e2c28!important;transform:none!important;}
+.mb-new{background:#3e5238;border-color:#4a6042;color:#cce0cc;width:100%;padding:9px 14px;font-size:12.5px;font-weight:500;letter-spacing:.05em;}
+.mb-new:hover{background:#4a6042;border-color:#5a7050;}
+.gl .mb{background:#ece6db;border-color:#d8d0c0;color:#6a5a4a;}
+.gl .mb:hover{background:#e2dbd0;}
+.gl .mb-primary{background:#6a8060;border-color:#6a8060;color:#f0f4ee;}
+.gl .mb-primary:hover{background:#7a9070;border-color:#7a9070;}
+.gl .mb-ghost{background:transparent;border-color:#d8d0c0;color:#9a8a78;}
+.gl .mb-ghost:hover{background:#e8e2d8;color:#5a4e42;}
+.gl .mb-sel{background:#e4edde!important;border-color:#7a8f6e!important;color:#4a6040!important;}
+.gl .mb-danger:hover{background:#f0e8e8;border-color:#c0a0a0;color:#a06060;}
+.gl .mb-new{background:#6a8060;border-color:#7a9070;color:#f0f4ee;}
+.gl .mb-new:hover{background:#7a9070;}
+.gl .mb-icon:hover{background:#e2dbd0!important;}
+`;
+
+function Ring({value,max,size=34,stroke=2.5,color}){
+  const r=(size-stroke*2)/2,circ=2*Math.PI*r,pct=Math.min(1,value/Math.max(1,max));
+  return(
+    <svg width={size} height={size} style={{transform:"rotate(-90deg)",flexShrink:0}}>
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="rgba(154,171,140,.12)" strokeWidth={stroke}/>
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={stroke}
+        strokeDasharray={circ} strokeDashoffset={circ*(1-pct)} strokeLinecap="round"
+        style={{transition:"stroke-dashoffset .5s ease"}}/>
+    </svg>
+  );
+}
+
+function SaveDot({status,c}){
+  const [blot,setBlot]=useState(false);
+  useEffect(()=>{if(status==="saved"){setBlot(true);const t=setTimeout(()=>setBlot(false),600);return()=>clearTimeout(t);}},[status]);
+  return(
+    <span style={{position:"relative",fontSize:10,color:status==="saving"?c.accent:c.muted,letterSpacing:".05em",display:"inline-flex",alignItems:"center",gap:4,animation:status==="saving"?"pulse 1s infinite":"none"}}>
+      {blot&&<span style={{position:"absolute",left:-1,top:-1,width:6,height:6,borderRadius:"50%",background:c.accent,animation:"blotOut .5s ease forwards",pointerEvents:"none"}}/>}
+      {status==="saving"?"saving…":"saved"}
+    </span>
+  );
+}
+
+export default function App(){
+  const [dm,setDm]=useState(()=>loadJSON(PREFS_KEY,{dm:true}).dm);
+  return <Journal dm={dm} setDm={setDm}/>;
+}
+
+function Journal({dm,setDm}){
+  const [journals,   setJournals] = useState(()=>loadJSON(STORAGE_KEY,initialJournals));
+  const [activeId,   setActiveId] = useState(()=>loadJSON(STORAGE_KEY,initialJournals)[0]?.id||null);
+  const [view,       setView]     = useState("editor");
+  const [panelOpen,  setPanel]    = useState(true);
+  const [search,     setSearch]   = useState("");
+  const [tagFilter,  setTagF]     = useState(null);
+  const [focusMode,  setFocus]    = useState(false);
+  const [typewriter, setTW]       = useState(false);
+  const [saveStatus, setSave]     = useState("saved");
+  const [wordGoal,   setWordGoal] = useState(()=>loadJSON(PREFS_KEY,{wg:500}).wg);
+  const [moods,      setMoods]    = useState(()=>loadJSON(MOODS_KEY,{}));
+  const [cmdOpen,    setCmdOpen]  = useState(false);
+  const [cmdQ,       setCmdQ]     = useState("");
+  const [newType,    setNewType]  = useState(null);
+  const [newTitle,   setNewTitle] = useState("");
+  const [brushColor, setBrushC]   = useState("#c4a882");
+  const [brushSize,  setBrushS]   = useState(3);
+  const [sTool,      setSTool]    = useState("pen");
+  const [sBg,        setSBg]      = useState("#1a1916");
+  const [streakAnim, setStrAnim]  = useState(false);
+
+  const artRef   =useRef(null);
+  const sketchRef=useRef(null);
+  const saveTimer=useRef(null);
+  const c=dm?dark:light;
+  const active=journals.find(j=>j.id===activeId);
+  const streak    =useMemo(()=>calcStreak(journals),[journals]);
+  const longestStr=useMemo(()=>calcLongestStreak(journals),[journals]);
+  const words=wc(active?.content);
+
+  useEffect(()=>{saveJSON(STORAGE_KEY,journals);},[journals]);
+  useEffect(()=>{saveJSON(MOODS_KEY,moods);},[moods]);
+  useEffect(()=>{saveJSON(PREFS_KEY,{dm,wg:wordGoal});},[dm,wordGoal]);
+  useEffect(()=>{if(streak>0){setStrAnim(true);setTimeout(()=>setStrAnim(false),900);}},[]);
+
+  const updateJournal=useCallback((id,upd)=>{
+    setSave("saving");clearTimeout(saveTimer.current);
+    setJournals(prev=>prev.map(j=>j.id===id?{...j,...upd,updated:new Date().toISOString()}:j));
+    saveTimer.current=setTimeout(()=>setSave("saved"),900);
+  },[]);
+
+  const createJournal=()=>{
+    if(!newTitle.trim()||!newType)return;
+    const j={id:generateId(),title:newTitle.trim(),type:newType,content:"",created:new Date().toISOString(),updated:new Date().toISOString(),archived:false,pinned:false,tags:[],meta:{}};
+    setJournals(p=>[j,...p]);setActiveId(j.id);setView("editor");setNewTitle("");setNewType(null);
+  };
+  const deleteJournal  =id=>{setJournals(p=>p.filter(j=>j.id!==id));if(activeId===id)setActiveId(journals.find(j=>j.id!==id)?.id||null);};
+  const archiveJournal =id=>updateJournal(id,{archived:!journals.find(j=>j.id===id)?.archived});
+  const pinJournal     =id=>updateJournal(id,{pinned:!journals.find(j=>j.id===id)?.pinned});
+  const randomMemory   =()=>{const el=journals.filter(j=>!j.archived&&j.content?.trim()&&j.id!==activeId);if(!el.length)return;const j=el[Math.floor(Math.random()*el.length)];setActiveId(j.id);setView("editor");};
+  const exportMd       =()=>{if(!active)return;const b=new Blob([`# ${active.title}\n\n${active.content||""}`],{type:"text/markdown"});const a=document.createElement("a");a.href=URL.createObjectURL(b);a.download=`${active.title}.md`;a.click();};
+
+  const allTags=useMemo(()=>[...new Set(journals.flatMap(j=>j.tags||[]))]   ,[journals]);
+  const filtered=useMemo(()=>{
+    let l=journals.filter(j=>!j.archived);
+    if(search)   l=l.filter(j=>j.title.toLowerCase().includes(search.toLowerCase())||j.content?.toLowerCase().includes(search.toLowerCase()));
+    if(tagFilter)l=l.filter(j=>(j.tags||[]).includes(tagFilter));
+    return [...l.filter(j=>j.pinned),...l.filter(j=>!j.pinned)];
+  },[journals,search,tagFilter]);
+  const archived=journals.filter(j=>j.archived);
+  const tInfo=JOURNAL_TYPES.find(t=>t.id===active?.type);
+
+  const cmdItems=useMemo(()=>{
+    const q=cmdQ.toLowerCase();
+    const acts=[
+      {l:"New Journal",    i:"✦",fn:()=>{setCmdOpen(false);setView("new");}},
+      {l:"Dashboard",      i:"⊞",fn:()=>{setCmdOpen(false);setView("dashboard");}},
+      {l:"Calendar",       i:"◫",fn:()=>{setCmdOpen(false);setView("calendar");}},
+      {l:"Heatmap",        i:"▦",fn:()=>{setCmdOpen(false);setView("heatmap");}},
+      {l:"Toggle Theme",   i:"◑",fn:()=>{setCmdOpen(false);setDm(d=>!d);}},
+      {l:"Focus Mode",     i:"⊡",fn:()=>{setCmdOpen(false);setFocus(f=>!f);}},
+      {l:"Typewriter Mode",i:"↕",fn:()=>{setCmdOpen(false);setTW(t=>!t);}},
+      {l:"Random Memory",  i:"✧",fn:()=>{setCmdOpen(false);randomMemory();}},
+      {l:"Export Markdown",i:"↓",fn:()=>{setCmdOpen(false);exportMd();}},
+      ...journals.filter(j=>!j.archived).map(j=>({l:j.title,i:JOURNAL_TYPES.find(t=>t.id===j.type)?.icon||"◇",fn:()=>{setCmdOpen(false);setActiveId(j.id);setView("editor");}})),
+    ];
+    return q?acts.filter(a=>a.l.toLowerCase().includes(q)):acts;
+  },[cmdQ,journals]);
+
+  useEffect(()=>{
+    const h=e=>{
+      if((e.metaKey||e.ctrlKey)&&e.key==="k"){e.preventDefault();setCmdOpen(o=>!o);setCmdQ("");}
+      if((e.metaKey||e.ctrlKey)&&e.key==="b"){e.preventDefault();setPanel(s=>!s);}
+      if((e.metaKey||e.ctrlKey)&&e.key==="f"){e.preventDefault();setFocus(s=>!s);}
+      if((e.metaKey||e.ctrlKey)&&e.key==="n"){e.preventDefault();setView("new");}
+      if(e.key==="Escape"){setCmdOpen(false);setFocus(false);}
+    };
+    window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);
+  },[]);
+
+  const cssVars={"--ep":c.editorLine,"--ch":c.cardHov,"--cb":c.borderHov};
+
+  return(
+    <div className={dm?"":"gl"} style={{display:"flex",height:"100vh",overflow:"hidden",background:c.bg,color:c.text,fontFamily:"'DM Sans',system-ui,sans-serif",...cssVars}}>
+      <style>{CSS+BTN_CSS}</style>
+
+      {/* ── Command Palette ── */}
+      {cmdOpen&&(
+        <div onClick={()=>setCmdOpen(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.48)",zIndex:500,display:"flex",alignItems:"flex-start",justifyContent:"center",paddingTop:90,animation:"fadeIn .12s ease"}}>
+          <div onClick={e=>e.stopPropagation()} style={{width:"100%",maxWidth:500,background:c.card,border:`1px solid ${c.border}`,borderRadius:11,overflow:"hidden",boxShadow:"0 20px 60px rgba(0,0,0,.45)",animation:"fadeUp .16s ease"}}>
+            <div style={{display:"flex",alignItems:"center",padding:"0 16px",borderBottom:`1px solid ${c.border}`,gap:10}}>
+              <span style={{color:c.muted,fontSize:14}}>⌕</span>
+              <input autoFocus value={cmdQ} onChange={e=>setCmdQ(e.target.value)} placeholder="Jump to journal or action…"
+                style={{flex:1,background:"transparent",border:"none",padding:"14px 0",fontSize:14,color:c.text}}/>
+              <kbd style={{fontSize:9.5,color:c.muted,background:c.inputBg,border:`1px solid ${c.border}`,borderRadius:4,padding:"2px 6px",fontFamily:"inherit"}}>ESC</kbd>
+            </div>
+            <div style={{maxHeight:320,overflowY:"auto"}}>
+              {cmdItems.slice(0,14).map((item,i)=>(
+                <div key={i} onClick={item.fn} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 16px",cursor:"pointer",borderBottom:`1px solid ${c.border}`,transition:"background .1s"}}
+                  onMouseEnter={e=>e.currentTarget.style.background=c.inputBg}
+                  onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                  <span style={{color:c.accent,fontSize:12,width:16,textAlign:"center",flexShrink:0}}>{item.i}</span>
+                  <span style={{fontSize:13,color:c.text}}>{item.l}</span>
+                </div>
+              ))}
+              {!cmdItems.length&&<div style={{padding:"22px 16px",color:c.muted,fontSize:12,textAlign:"center"}}>No results</div>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Icon Rail ── */}
+      {!focusMode&&(
+        <div className="desk-side" style={{width:44,flexShrink:0,background:c.rail,borderRight:`1px solid ${c.border}`,display:"flex",flexDirection:"column",alignItems:"center",paddingTop:10,gap:3,zIndex:10}}>
+          {[{i:"☰",v:"_sb",label:"Toggle sidebar"},{i:null},{i:"✦",v:"new",label:"New Journal"},{i:"⊞",v:"dashboard",label:"Dashboard"},{i:"◫",v:"calendar",label:"Calendar"},{i:"▦",v:"heatmap",label:"Heatmap"}].map((item,idx)=>{
+            if(item.i===null)return <div key={idx} style={{width:18,height:1,background:c.border,margin:"3px 0"}}/>;
+            const isActive=view===item.v;
+            return(
+              <button key={item.v} title={item.label}
+                onClick={()=>item.v==="_sb"?setPanel(s=>!s):setView(item.v)}
+                style={{width:30,height:30,borderRadius:6,background:isActive?c.activeItem:"transparent",border:`1px solid ${isActive?c.activeBorder:"transparent"}`,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,color:isActive?c.accent:c.muted,transition:"all .11s"}}
+                onMouseEnter={e=>{if(!isActive){e.currentTarget.style.background=c.inputBg;e.currentTarget.style.color=c.textSoft;}}}
+                onMouseLeave={e=>{if(!isActive){e.currentTarget.style.background="transparent";e.currentTarget.style.color=c.muted;}}}>
+                {item.i}
+              </button>
+            );
+          })}
+          <div style={{flex:1}}/>
+          <button title={dm?"Light mode":"Dark mode"} onClick={()=>setDm(d=>!d)}
+            style={{width:30,height:30,borderRadius:6,background:"transparent",border:"none",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,color:c.muted,marginBottom:8,transition:"all .11s"}}
+            onMouseEnter={e=>{e.currentTarget.style.background=c.inputBg;e.currentTarget.style.color=c.textSoft;}}
+            onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.color=c.muted;}}>
+            {dm?"☀":"☽"}
+          </button>
+        </div>
+      )}
+
+      {/* ── Sidebar Panel ── */}
+      {!focusMode&&(
+        <div className="desk-side" style={{width:panelOpen?255:0,flexShrink:0,overflow:"hidden",transition:"width .26s ease",background:c.sidebar,borderRight:`1px solid ${c.border}`,display:"flex",flexDirection:"column",boxShadow:`inset -1px 0 0 ${c.border}`}}>
+          <div style={{width:255,height:"100%",display:"flex",flexDirection:"column"}}>
+            <div style={{padding:"18px 16px 12px",borderBottom:`1px solid ${c.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
+              <div>
+                <div className="ff-serif" style={{fontSize:24,fontWeight:300,letterSpacing:".2em",color:c.accent,lineHeight:1}}>MYLOV</div>
+                <div style={{fontSize:8.5,color:c.muted,marginTop:3,letterSpacing:".2em",textTransform:"uppercase"}}>Your sanctuary</div>
+              </div>
+              {streak>0&&(
+                <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:1,animation:streakAnim?"streakIn .7s ease":"none",cursor:"default"}} title={`${streak}-day streak · best: ${longestStr}`}>
+                  <span style={{fontSize:18}}>🔥</span>
+                  <span style={{fontSize:10,fontWeight:600,color:c.accent}}>{streak}</span>
+                </div>
+              )}
+            </div>
+
+            <div style={{padding:"9px 11px 5px",flexShrink:0}}>
+              <div style={{position:"relative"}}>
+                <span style={{position:"absolute",left:9,top:"50%",transform:"translateY(-50%)",color:c.muted,fontSize:12,pointerEvents:"none"}}>⌕</span>
+                <input placeholder="Search…  ⌘K" value={search} onChange={e=>setSearch(e.target.value)}
+                  style={{width:"100%",background:c.inputBg,border:`1px solid ${c.border}`,borderRadius:6,padding:"7px 9px 7px 25px",fontSize:11.5,color:c.text,transition:"border-color .14s"}}
+                  onFocus={e=>e.target.style.borderColor=c.accent} onBlur={e=>e.target.style.borderColor=c.border}/>
+              </div>
+            </div>
+
+            {allTags.length>0&&(
+              <div style={{padding:"4px 11px 5px",display:"flex",gap:3,flexWrap:"wrap",flexShrink:0}}>
+                {allTags.slice(0,8).map(t=>(
+                  <Btn key={t} v={`mb-pill mb-ghost${tagFilter===t?" mb-sel":""}`} onClick={()=>setTagF(tagFilter===t?null:t)} style={{fontSize:10,padding:"3px 8px"}}>#{t}</Btn>
+                ))}
+              </div>
+            )}
+
+            <div style={{padding:"4px 11px 8px",flexShrink:0}}>
+              <Btn v="mb-new" onClick={()=>setView("new")} style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
+                <span style={{fontSize:15,lineHeight:1}}>+</span> New Journal
+              </Btn>
+            </div>
+
+            <div style={{flex:1,overflowY:"auto",padding:"0 4px"}}>
+              {JOURNAL_TYPES.map(type=>{
+                const group=filtered.filter(j=>j.type===type.id);
+                if(!group.length)return null;
+                return(
+                  <div key={type.id} style={{marginBottom:2}}>
+                    <div style={{padding:"5px 9px 3px",fontSize:8.5,color:c.muted,letterSpacing:".18em",textTransform:"uppercase",fontWeight:500,display:"flex",alignItems:"center",gap:4}}>
+                      <span style={{color:type.color,opacity:.65}}>{type.icon}</span>{type.label}
+                    </div>
+                    {group.map(j=>(
+                      <div key={j.id} className="jitem" onClick={()=>{setActiveId(j.id);setView("editor");}}
+                        style={{position:"relative",padding:"8px 9px",borderRadius:6,marginBottom:1,cursor:"pointer",
+                          background:activeId===j.id?c.activeItem:"transparent",
+                          borderLeft:activeId===j.id?`2px solid ${c.activeBorder}`:"2px solid transparent"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:3}}>
+                          {j.pinned&&<span style={{fontSize:8,color:c.accentAlt}}>●</span>}
+                          <span style={{fontSize:12,fontWeight:activeId===j.id?500:400,color:activeId===j.id?c.text:c.textSoft,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flex:1,paddingRight:36}}>{j.title}</span>
+                        </div>
+                        <div style={{fontSize:9,color:c.muted,marginTop:1}}>{timeAgo(j.updated)}{(j.tags||[]).length>0?` · #${j.tags[0]}`:""}</div>
+                        <div className="jact" style={{position:"absolute",right:4,top:"50%",transform:"translateY(-50%)",display:"flex",gap:1,opacity:0,transition:"opacity .1s"}}>
+                          <Btn v="mb-icon" title={j.pinned?"Unpin":"Pin"} onClick={e=>{e.stopPropagation();pinJournal(j.id);}} style={{fontSize:10,color:c.accentAlt}}>{j.pinned?"◉":"○"}</Btn>
+                          <Btn v="mb-icon" title="Archive" onClick={e=>{e.stopPropagation();archiveJournal(j.id);}} style={{color:c.muted,fontSize:11}}>⊟</Btn>
+                          <Btn v="mb-icon mb-danger" title="Delete" onClick={e=>{e.stopPropagation();deleteJournal(j.id);}} style={{fontSize:11}}>✕</Btn>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })}
+              {!filtered.length&&!search&&!tagFilter&&(
+                <div style={{padding:"34px 16px",textAlign:"center",animation:"fadeUp .4s ease"}}>
+                  <div className="ff-serif" style={{fontSize:38,color:c.accent,opacity:.15,marginBottom:10}}>✦</div>
+                  <div className="ff-lora" style={{fontSize:11.5,color:c.muted,fontStyle:"italic",lineHeight:1.7}}>"Fill your paper with the breathings of your heart."</div>
+                  <div style={{fontSize:9.5,color:c.muted,opacity:.45,marginTop:8,letterSpacing:".05em"}}>— Wordsworth</div>
+                </div>
+              )}
+              {!filtered.length&&(search||tagFilter)&&<div style={{padding:"20px",color:c.muted,fontSize:11.5,textAlign:"center"}}>No matches</div>}
+              {archived.length>0&&(
+                <div style={{marginTop:12,paddingTop:12,borderTop:`1px solid ${c.border}`}}>
+                  <div style={{padding:"3px 9px",fontSize:8.5,color:c.muted,letterSpacing:".18em",textTransform:"uppercase"}}>Archived ({archived.length})</div>
+                  {archived.map(j=><div key={j.id} onClick={()=>{setActiveId(j.id);setView("editor");}} style={{padding:"6px 9px",borderRadius:6,cursor:"pointer",opacity:.38,fontSize:11.5,color:c.textSoft}}>{j.title}</div>)}
+                </div>
+              )}
+            </div>
+
+            <div style={{borderTop:`1px solid ${c.border}`,padding:"8px 10px",flexShrink:0,display:"flex",gap:5}}>
+              <Btn v="mb-ghost" onClick={randomMemory} style={{flex:1,fontSize:10,padding:"5px 6px"}}>✧ Memory</Btn>
+              <Btn v="mb-ghost" onClick={exportMd} style={{flex:1,fontSize:10,padding:"5px 6px"}}>↓ .md</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Main ── */}
+      <main style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",position:"relative",minWidth:0}} className={focusMode?"focus-vignette":""}>
+        {!focusMode&&(
+          <header className="ff-sans" style={{display:"flex",alignItems:"center",padding:"0 16px",height:46,borderBottom:`1px solid ${c.border}`,background:c.header,gap:8,flexShrink:0}}>
+            {active&&view==="editor"&&(
+              <>
+                <span style={{color:tInfo?.color||c.accent,fontSize:11,flexShrink:0}}>{tInfo?.icon}</span>
+                <input value={active.title} onChange={e=>updateJournal(active.id,{title:e.target.value})}
+                  style={{background:"none",border:"none",fontSize:13.5,fontWeight:500,color:c.text,flex:1,minWidth:0,letterSpacing:".01em"}}/>
+                <SaveDot status={saveStatus} c={c}/>
+                {active.type!=="sketch"&&active.type!=="art"&&(
+                  <div style={{display:"flex",alignItems:"center",gap:5,flexShrink:0}}>
+                    <Ring value={words} max={wordGoal} size={26} stroke={2} color={c.accent}/>
+                    <span style={{fontSize:9,color:c.muted,whiteSpace:"nowrap"}}>{words}/{wordGoal}</span>
+                  </div>
+                )}
+                <Btn v={`mb-ghost${typewriter?" mb-sel":""}`} onClick={()=>setTW(t=>!t)} style={{fontSize:10,padding:"3px 8px",flexShrink:0}} title="Typewriter mode">↕</Btn>
+                <Btn v="mb-ghost" onClick={()=>setFocus(true)} style={{fontSize:10,padding:"3px 8px",flexShrink:0}} title="Focus mode">⊡</Btn>
+              </>
+            )}
+            {view!=="editor"&&<span className="ff-serif" style={{fontSize:18,fontWeight:300,color:c.textSoft,letterSpacing:".04em"}}>{view==="new"?"New Journal":view==="dashboard"?"Overview":view==="calendar"?"Calendar":view==="heatmap"?"Heatmap":""}</span>}
+            <div style={{marginLeft:"auto",flexShrink:0}}>
+              <Btn v="mb-ghost" onClick={()=>{setCmdOpen(true);setCmdQ("");}} style={{fontSize:10,padding:"3px 9px",gap:4}}>⌘K</Btn>
+            </div>
+          </header>
+        )}
+
+        {focusMode&&(
+          <button onClick={()=>setFocus(false)} style={{position:"fixed",top:14,right:16,zIndex:300,background:c.card,border:`1px solid ${c.border}`,borderRadius:18,padding:"5px 13px",fontSize:11,color:c.muted,cursor:"pointer",letterSpacing:".04em"}}>✕ Focus</button>
+        )}
+
+        <div className="main-content" style={{flex:1,overflow:"auto"}}>
+          <div key={view} style={{animation:"fadeUp .2s ease",minHeight:"100%"}}>
+            {view==="new"&&<NewJournalView c={c} newType={newType} setNewType={setNewType} newTitle={newTitle} setNewTitle={setNewTitle} onCreate={createJournal} onCancel={()=>setView(activeId?"editor":"dashboard")}/>}
+            {view==="dashboard"&&<DashboardView c={c} journals={journals} setActiveId={setActiveId} setView={setView} moods={moods} setMoods={setMoods} streak={streak} longestStr={longestStr} wordGoal={wordGoal} setWordGoal={setWordGoal}/>}
+            {view==="calendar"&&<CalendarView c={c} journals={journals} setActiveId={setActiveId} setView={setView}/>}
+            {view==="heatmap"&&<HeatmapView c={c} journals={journals} streak={streak} longestStr={longestStr}/>}
+            {view==="editor"&&active&&<EditorView key={activeId} c={c} journal={active} onUpdate={updateJournal} focusMode={focusMode} typewriter={typewriter} artRef={artRef} sketchRef={sketchRef} brushColor={brushColor} setBrushColor={setBrushC} brushSize={brushSize} setBrushSize={setBrushS} sketchTool={sTool} setSketchTool={setSTool} sketchBg={sBg} setSketchBg={setSBg} dm={dm} wordGoal={wordGoal}/>}
+            {view==="editor"&&!active&&<EmptyState c={c} setView={setView}/>}
+          </div>
+        </div>
+
+        <nav className="mob-nav" style={{position:"fixed",bottom:0,left:0,right:0,height:56,background:c.sidebar,borderTop:`1px solid ${c.border}`,alignItems:"center",justifyContent:"space-around",zIndex:100,padding:"0 8px"}}>
+          {[{i:"✦",v:"new"},{i:"⊞",v:"dashboard"},{i:"◫",v:"calendar"},{i:"▦",v:"heatmap"},{i:"◑",v:"_t"}].map(({i,v})=>(
+            <button key={v} onClick={()=>v==="_t"?setDm(d=>!d):setView(v)}
+              style={{width:42,height:42,borderRadius:9,background:view===v?c.activeItem:"transparent",border:"none",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,color:view===v?c.accent:c.muted,transition:"all .11s"}}>{i}</button>
+          ))}
+        </nav>
+      </main>
+    </div>
+  );
+}
+
+function EmptyState({c,setView}){
+  const qs=[
+    {t:"The act of writing is the act of discovering what you believe.",a:"David Hare"},
+    {t:"Fill your paper with the breathings of your heart.",a:"Wordsworth"},
+    {t:"Journal writing is a voyage to the interior.",a:"Christina Baldwin"},
+    {t:"A diary means yes indeed.",a:"Anaïs Nin"},
+  ];
+  const q=qs[Math.floor(Date.now()/86400000)%4];
+  return(
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",flexDirection:"column",padding:48,animation:"fadeUp .4s ease"}}>
+      <div className="ff-serif" style={{fontSize:68,fontWeight:300,color:c.accent,opacity:.07,lineHeight:1,marginBottom:26,letterSpacing:".14em"}}>MYLOV</div>
+      <div style={{maxWidth:360,textAlign:"center",marginBottom:30}}>
+        <div className="ff-lora" style={{fontSize:16,color:c.text,opacity:.58,lineHeight:1.78,fontStyle:"italic",marginBottom:10}}>"{q.t}"</div>
+        <div style={{fontSize:10.5,color:c.muted,letterSpacing:".08em"}}>— {q.a}</div>
+      </div>
+      <Btn v="mb-primary" onClick={()=>setView("new")} style={{padding:"11px 26px",fontSize:13,letterSpacing:".05em",borderRadius:8}}>Begin Writing</Btn>
+      <div style={{fontSize:10.5,color:c.muted,marginTop:10,letterSpacing:".04em"}}>Your thoughts deserve a home.</div>
+    </div>
+  );
+}
+
+function NewJournalView({c,newType,setNewType,newTitle,setNewTitle,onCreate,onCancel}){
+  const ready=newTitle.trim()&&newType;
+  return(
+    <div style={{maxWidth:540,margin:"38px auto",padding:"0 24px",animation:"fadeUp .22s ease"}}>
+      <div className="ff-serif" style={{fontSize:34,fontWeight:300,color:c.text,marginBottom:5}}>New Journal</div>
+      <div className="ff-lora" style={{fontSize:13,color:c.muted,marginBottom:26,fontStyle:"italic"}}>Choose a format that resonates with you today.</div>
+      <div style={{marginBottom:18}}>
+        <label style={{fontSize:9.5,color:c.muted,letterSpacing:".12em",textTransform:"uppercase",display:"block",marginBottom:7}}>Title</label>
+        <input autoFocus placeholder="Give this journal a name…" value={newTitle} onChange={e=>setNewTitle(e.target.value)} onKeyDown={e=>e.key==="Enter"&&ready&&onCreate()}
+          style={{width:"100%",background:c.inputBg,border:`1px solid ${c.border}`,borderRadius:8,padding:"11px 14px",fontSize:15,color:c.text,fontFamily:"'Lora',serif",transition:"border-color .14s"}}
+          onFocus={e=>e.target.style.borderColor=c.accent} onBlur={e=>e.target.style.borderColor=c.border}/>
+      </div>
+      <div style={{marginBottom:26}}>
+        <label style={{fontSize:9.5,color:c.muted,letterSpacing:".12em",textTransform:"uppercase",display:"block",marginBottom:9}}>Format</label>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7}}>
+          {JOURNAL_TYPES.map(t=>(
+            <button key={t.id} onClick={()=>setNewType(t.id)}
+              style={{textAlign:"left",padding:"13px",borderRadius:9,background:newType===t.id?c.activeItem:c.inputBg,border:`1px solid ${newType===t.id?c.activeBorder:c.border}`,cursor:"pointer",transition:"all .14s",animation:"fadeUp .2s ease"}}>
+              <div style={{fontSize:17,marginBottom:5,color:t.color}}>{t.icon}</div>
+              <div style={{fontSize:12.5,fontWeight:500,color:c.text,marginBottom:2,fontFamily:"'DM Sans',sans-serif"}}>{t.label}</div>
+              <div style={{fontSize:11,color:c.muted,fontFamily:"'DM Sans',sans-serif"}}>{t.desc}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        <Btn v={ready?"mb-primary":"mb-dis"} disabled={!ready} onClick={onCreate} style={{padding:"10px 22px",fontSize:12.5,borderRadius:7}}>Create Journal</Btn>
+        <Btn v="mb-ghost" onClick={onCancel} style={{padding:"10px 16px",fontSize:12.5,borderRadius:7}}>Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+function DashboardView({c,journals,setActiveId,setView,moods,setMoods,streak,longestStr,wordGoal,setWordGoal}){
+  const active=journals.filter(j=>!j.archived);
+  const totalWords=active.reduce((a,j)=>a+wc(j.content),0);
+  const hour=new Date().getHours();
+  const greeting=hour<12?"Good morning":hour<17?"Good afternoon":"Good evening";
+  const today=ymd(),todayMood=moods[today];
+  const cloud=useMemo(()=>buildWordCloud(journals),[journals]);
+  const onThisDay=useMemo(()=>getOnThisDay(journals),[journals]);
+  const weekDays=useMemo(()=>Array.from({length:7},(_,i)=>{const d=new Date();d.setDate(d.getDate()-6+i);return ymd(d);}),[]);
+  const weekWords=weekDays.map(d=>journals.filter(j=>ymd(j.updated)===d).reduce((a,j)=>a+wc(j.content),0));
+  const byType=JOURNAL_TYPES.map(t=>({...t,count:active.filter(j=>j.type===t.id).length})).filter(t=>t.count>0);
+
+  return(
+    <div style={{maxWidth:800,margin:"0 auto",padding:"34px 26px 60px",overflowY:"auto",height:"100%"}}>
+      <div style={{marginBottom:26}}>
+        <div className="ff-serif" style={{fontSize:36,fontWeight:300,color:c.text,letterSpacing:"-.01em"}}>{greeting}</div>
+        <div style={{fontSize:11.5,color:c.muted,marginTop:4,letterSpacing:".04em"}}>{new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"})}</div>
+      </div>
+
+      {onThisDay.length>0&&(
+        <div style={{background:c.card,border:`1px solid ${c.border}`,borderLeft:`3px solid ${c.accentAlt}`,borderRadius:9,padding:"14px 16px",marginBottom:16}}>
+          <div style={{fontSize:9.5,color:c.accentAlt,letterSpacing:".12em",textTransform:"uppercase",marginBottom:8,fontWeight:500}}>On This Day</div>
+          {onThisDay.slice(0,3).map(j=>{
+            const yr=new Date(j.created).getFullYear(),t=JOURNAL_TYPES.find(x=>x.id===j.type);
+            return(
+              <div key={j.id} className="ecard" onClick={()=>{setActiveId(j.id);setView("editor");}}
+                style={{display:"flex",alignItems:"center",gap:10,padding:"9px 11px",borderRadius:7,background:c.inputBg,border:`1px solid ${c.border}`,marginBottom:5}}>
+                <div style={{fontSize:11,color:c.accentAlt,fontWeight:600,flexShrink:0,width:36,textAlign:"center",lineHeight:1.1,fontFamily:"'DM Sans',sans-serif"}}>{yr}</div>
+                <div style={{width:1,height:26,background:c.border,flexShrink:0}}/>
+                <div style={{minWidth:0}}>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
+                    <span style={{color:t?.color||c.accent,fontSize:11}}>{t?.icon}</span>
+                    <span style={{fontSize:12.5,fontWeight:500,color:c.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{j.title}</span>
+                  </div>
+                  <div className="ff-lora" style={{fontSize:11,color:c.muted,fontStyle:"italic"}}>{j.content?.slice(0,55).trim()}{j.content?.length>55?"…":""}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:9,marginBottom:16}}>
+        {[{l:"Journals",v:active.length},{l:"Words",v:totalWords.toLocaleString()},{l:"Streak",v:streak,hi:streak>0?"🔥":null},{l:"Best Streak",v:longestStr}].map((s,i)=>(
+          <div key={s.l} style={{background:c.card,border:`1px solid ${c.border}`,borderRadius:9,padding:"13px 14px",animation:`fadeUp ${.08+i*.06}s ease`}}>
+            <div style={{display:"flex",alignItems:"baseline",gap:5}}>
+              <div className="ff-serif" style={{fontSize:28,fontWeight:300,color:c.accent,lineHeight:1}}>{s.v}</div>
+              {s.hi&&<span style={{fontSize:16}}>{s.hi}</span>}
+            </div>
+            <div style={{fontSize:9,color:c.muted,marginTop:4,letterSpacing:".1em",textTransform:"uppercase"}}>{s.l}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{background:c.card,border:`1px solid ${c.border}`,borderRadius:9,padding:"14px 16px",marginBottom:16}}>
+        <div style={{fontSize:9.5,color:c.muted,letterSpacing:".1em",textTransform:"uppercase",marginBottom:11}}>Words This Week</div>
+        <div style={{display:"flex",alignItems:"flex-end",gap:5,height:56}}>
+          {weekDays.map((d,i)=>{
+            const max=Math.max(...weekWords,1),pct=weekWords[i]/max,isToday=d===today;
+            const label=new Date(d+"T12:00:00").toLocaleDateString("en-US",{weekday:"short"}).slice(0,1);
+            return(
+              <div key={d} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+                <div style={{width:"100%",height:48,display:"flex",alignItems:"flex-end"}}>
+                  <div style={{width:"100%",borderRadius:"3px 3px 0 0",height:`${Math.max(4,pct*100)}%`,background:isToday?c.accent:c.accentDim,transition:"height .4s ease",opacity:isToday?1:.65}}/>
+                </div>
+                <div style={{fontSize:9,color:isToday?c.accent:c.muted}}>{label}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:16,marginBottom:16}}>
+        <div style={{background:c.card,border:`1px solid ${c.border}`,borderRadius:9,padding:"14px 16px"}}>
+          <div style={{fontSize:9.5,color:c.muted,letterSpacing:".1em",textTransform:"uppercase",marginBottom:10}}>Today's Mood</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:10}}>
+            {MOODS.map(m=>(
+              <button key={m.id} onClick={()=>setMoods(p=>({...p,[today]:m.id}))}
+                style={{padding:"5px 10px",borderRadius:14,border:`1px solid ${todayMood===m.id?m.color:c.border}`,background:todayMood===m.id?`${m.color}20`:c.inputBg,color:todayMood===m.id?m.color:c.muted,fontSize:11,cursor:"pointer",transition:"all .13s",fontFamily:"'DM Sans',sans-serif",letterSpacing:".03em"}}>
+                {m.label}
+              </button>
+            ))}
+          </div>
+          <div style={{display:"flex",gap:4,alignItems:"center"}}>
+            <span style={{fontSize:9,color:c.muted,letterSpacing:".05em",textTransform:"uppercase",width:28}}>Week</span>
+            {weekDays.map(d=>{
+              const mood=MOODS.find(m=>m.id===moods[d]);
+              return <div key={d} title={mood?`${d}: ${mood.label}`:d} style={{width:16,height:16,borderRadius:"50%",background:mood?`${mood.color}28`:c.inputBg,border:`1px solid ${mood?mood.color:c.border}`,flexShrink:0,transition:"all .2s"}}/>;
+            })}
+          </div>
+        </div>
+        <div style={{background:c.card,border:`1px solid ${c.border}`,borderRadius:9,padding:"14px 16px",minWidth:120}}>
+          <div style={{fontSize:9.5,color:c.muted,letterSpacing:".1em",textTransform:"uppercase",marginBottom:8}}>Word Goal</div>
+          <div className="ff-serif" style={{fontSize:26,fontWeight:300,color:c.accent,marginBottom:7}}>{wordGoal}</div>
+          <input type="number" value={wordGoal} onChange={e=>setWordGoal(Number(e.target.value)||500)} min={50} max={9999}
+            style={{width:"100%",background:c.inputBg,border:`1px solid ${c.border}`,borderRadius:6,padding:"4px 8px",fontSize:11,color:c.muted}}/>
+        </div>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 150px",gap:16,marginBottom:16}}>
+        {cloud.length>0
+          ?<div style={{background:c.card,border:`1px solid ${c.border}`,borderRadius:9,padding:"14px 16px"}}>
+            <div style={{fontSize:9.5,color:c.muted,letterSpacing:".1em",textTransform:"uppercase",marginBottom:10}}>Gratitude Cloud</div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",lineHeight:1.5}}>
+              {cloud.slice(0,28).map(({word,count})=>{
+                const max=cloud[0]?.count||1,size=10+Math.round((count/max)*12),op=.35+Math.round((count/max)*.5*10)/10;
+                return <span key={word} className="ff-serif" style={{fontSize:size,color:c.accentAlt,opacity:op,cursor:"default"}}>{word}</span>;
+              })}
+            </div>
+          </div>
+          :<div style={{background:c.card,border:`1px solid ${c.border}`,borderRadius:9,padding:"14px 16px",display:"flex",alignItems:"center",justifyContent:"center"}}>
+            <div style={{textAlign:"center",color:c.muted,fontSize:11,fontStyle:"italic",fontFamily:"'Lora',serif",lineHeight:1.6}}>Write gratitude journals<br/>to see your word cloud</div>
+          </div>
+        }
+        <div style={{background:c.card,border:`1px solid ${c.border}`,borderRadius:9,padding:"14px 16px"}}>
+          <div style={{fontSize:9.5,color:c.muted,letterSpacing:".1em",textTransform:"uppercase",marginBottom:9}}>By Type</div>
+          <div style={{display:"flex",flexDirection:"column",gap:5}}>
+            {byType.map(t=>(
+              <div key={t.id} style={{display:"flex",alignItems:"center",gap:6}}>
+                <span style={{color:t.color,fontSize:11,width:13}}>{t.icon}</span>
+                <span style={{flex:1,fontSize:10.5,color:c.textSoft,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.label}</span>
+                <span style={{fontSize:10,color:c.muted,background:c.inputBg,borderRadius:8,padding:"1px 6px"}}>{t.count}</span>
+              </div>
+            ))}
+            {!byType.length&&<div style={{fontSize:11,color:c.muted,fontStyle:"italic",fontFamily:"'Lora',serif"}}>No journals yet</div>}
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div style={{fontSize:9.5,color:c.muted,letterSpacing:".1em",textTransform:"uppercase",marginBottom:9}}>Recent Entries</div>
+        <div style={{display:"flex",flexDirection:"column",gap:5}}>
+          {active.sort((a,b)=>new Date(b.updated)-new Date(a.updated)).slice(0,5).map((j,i)=>{
+            const t=JOURNAL_TYPES.find(x=>x.id===j.type);
+            return(
+              <div key={j.id} className="ecard" onClick={()=>{setActiveId(j.id);setView("editor");}}
+                style={{background:c.card,border:`1px solid ${c.border}`,borderRadius:9,padding:"10px 13px",display:"flex",justifyContent:"space-between",alignItems:"center",animation:`fadeUp ${.08+i*.06}s ease`}}>
+                <div style={{minWidth:0,flex:1}}>
+                  <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:2}}>
+                    <span style={{color:t?.color||c.accent,fontSize:11,flexShrink:0}}>{t?.icon}</span>
+                    <span style={{fontSize:13,fontWeight:500,color:c.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{j.title}</span>
+                  </div>
+                  <div className="ff-lora" style={{fontSize:11,color:c.muted,fontStyle:"italic"}}>{j.content?.slice(0,52).trim()||"Empty"}{j.content?.length>52?"…":""}</div>
+                </div>
+                <div style={{fontSize:9.5,color:c.muted,textAlign:"right",flexShrink:0,marginLeft:14}}>
+                  <div>{timeAgo(j.updated)}</div>
+                  <div style={{color:c.accent,opacity:.65,marginTop:2}}>{wc(j.content)}w</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Bullet Editor ────────────────────────────────────────────────────────────
+function BulletEditor({ c, journal, onUpdate }) {
+  const [items,setItems]=useState(()=>{ try{return JSON.parse(journal.meta?.bullets||"[]");}catch{return [];} });
+  const [justChecked,setJustChecked]=useState(null);
+  const save=arr=>{ setItems(arr); onUpdate(journal.id,{meta:{...journal.meta,bullets:JSON.stringify(arr)},content:arr.map(i=>(i.done?"✓ ":"• ")+i.text+(i.recurring?" ↻":"")).join("\n")}); };
+  const toggle=id=>{ const it=items.find(i=>i.id===id); if(!it.done){setJustChecked(id);setTimeout(()=>setJustChecked(null),350);} save(items.map(i=>i.id===id?{...i,done:!i.done}:i)); };
+  const done=items.filter(i=>i.done).length, pct=items.length?done/items.length:0;
+  return (
+    <div style={{minHeight:"55vh"}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:18}}>
+        <span style={{fontSize:9.5,color:c.muted,letterSpacing:".08em",textTransform:"uppercase"}}>{done} / {items.length} complete</span>
+        <div style={{flex:1,height:2,background:c.border,borderRadius:1}}>
+          <div style={{height:"100%",width:`${pct*100}%`,background:c.accent,borderRadius:1,transition:"width .45s ease"}}/>
+        </div>
+        <span style={{fontSize:10.5,color:c.accent}}>{Math.round(pct*100)}%</span>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:1}}>
+        {items.map(item=>(
+          <div key={item.id} style={{display:"flex",alignItems:"center",gap:9,padding:"9px 4px",borderBottom:`1px solid ${c.border}`,animation:"slideL .18s ease"}}>
+            <button onClick={()=>toggle(item.id)}
+              style={{width:20,height:20,borderRadius:5,flexShrink:0,border:`1px solid ${item.done?c.accent:c.border}`,background:item.done?c.activeItem:c.inputBg,color:item.done?c.accent:c.muted,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",transition:"all .15s",animation:justChecked===item.id?"pop .3s ease":"none"}}>
+              {item.done?"✓":""}
+            </button>
+            <input value={item.text} onChange={e=>save(items.map(i=>i.id===item.id?{...i,text:e.target.value}:i))}
+              onKeyDown={e=>e.key==="Enter"&&save([...items,{id:generateId(),text:"",done:false,recurring:false}])}
+              style={{flex:1,background:"none",border:"none",fontSize:15,color:item.done?c.muted:c.text,textDecoration:item.done?"line-through":"none",fontFamily:"'Lora',serif",lineHeight:1.7,transition:"color .15s"}} placeholder="New task…"/>
+            <button onClick={()=>save(items.map(i=>i.id===item.id?{...i,recurring:!i.recurring}:i))} title="Recurring"
+              style={{fontSize:11,color:item.recurring?c.accent:c.muted,background:"none",border:`1px solid ${item.recurring?c.activeBorder:"transparent"}`,borderRadius:5,padding:"2px 5px",cursor:"pointer",transition:"all .12s"}}>↻</button>
+            <button onClick={()=>save(items.filter(i=>i.id!==item.id))}
+              style={{fontSize:11,color:c.muted,background:"none",border:"none",cursor:"pointer",opacity:.4,padding:"2px 4px",transition:"opacity .12s"}}
+              onMouseEnter={e=>e.currentTarget.style.opacity=".9"} onMouseLeave={e=>e.currentTarget.style.opacity=".4"}>✕</button>
+          </div>
+        ))}
+      </div>
+      <button onClick={()=>save([...items,{id:generateId(),text:"",done:false,recurring:false}])}
+        style={{marginTop:12,width:"100%",padding:"9px 14px",borderRadius:8,background:"transparent",border:`1px dashed ${c.border}`,color:c.muted,fontSize:13,cursor:"pointer",fontFamily:"'DM Sans',sans-serif",transition:"all .14s"}}
+        onMouseEnter={e=>{e.currentTarget.style.borderColor=c.accent;e.currentTarget.style.color=c.accent;e.currentTarget.style.borderStyle="solid";}}
+        onMouseLeave={e=>{e.currentTarget.style.borderColor=c.border;e.currentTarget.style.color=c.muted;e.currentTarget.style.borderStyle="dashed";}}>
+        + Add item
+      </button>
+      <textarea placeholder="Notes & reflections…" value={journal.content?.includes("•")?"":journal.content||""} onChange={e=>onUpdate(journal.id,{content:e.target.value})}
+        style={{width:"100%",marginTop:22,background:"transparent",border:"none",resize:"none",fontSize:15,lineHeight:1.95,color:c.text,fontFamily:"'Lora',serif",minHeight:150}}/>
+    </div>
+  );
+}
+
+// ─── Meta Fields ──────────────────────────────────────────────────────────────
+function MetaFields({ c, type, meta, updateMeta }) {
+  const inp={background:"transparent",border:`1px solid ${c.border}`,borderRadius:7,padding:"8px 11px",fontSize:12.5,color:c.text,width:"100%",transition:"border-color .14s",fontFamily:"'DM Sans',sans-serif"};
+  const lbl={fontSize:9.5,color:c.muted,letterSpacing:".1em",textTransform:"uppercase",display:"block",marginBottom:6};
+  const Pill=({label,active,onClick})=>(
+    <button onClick={onClick} style={{padding:"4px 11px",borderRadius:14,border:`1px solid ${active?c.accent:c.border}`,background:active?c.activeItem:c.inputBg,color:active?c.accent:c.muted,fontSize:11,cursor:"pointer",transition:"all .12s",fontFamily:"'DM Sans',sans-serif"}}>{label}</button>
+  );
+  if(type==="dream") return (
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      <div><label style={lbl}>Sleep Quality</label><div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{SLEEP_QUALITY.map(q=><Pill key={q} label={q} active={meta.sleep===q} onClick={()=>updateMeta("sleep",q)}/>)}</div></div>
+      <div>
+        <label style={lbl}>Dream Emotion</label>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {[{e:"😌",l:"Peaceful"},{e:"😰",l:"Fearful"},{e:"🤩",l:"Euphoric"},{e:"😢",l:"Sad"},{e:"🌀",l:"Confused"},{e:"💪",l:"Empowered"},{e:"🔮",l:"Mystical"}].map(({e,l})=>(
+            <button key={l} onClick={()=>updateMeta("emotion",l)} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:3,cursor:"pointer",padding:"8px 10px",borderRadius:8,background:meta.emotion===l?c.activeItem:c.inputBg,border:`1px solid ${meta.emotion===l?c.activeBorder:c.border}`,transition:"all .14s"}}>
+              <span style={{fontSize:20}}>{e}</span>
+              <span style={{fontSize:9,color:meta.emotion===l?c.accent:c.muted,letterSpacing:".04em"}}>{l}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+      <div><label style={lbl}>Tags</label><div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{["Lucid","Recurring","Nightmare","Vivid","Symbolic","Prophetic"].map(t=>{const a=(meta.tags||[]).includes(t);return <Pill key={t} label={t} active={a} onClick={()=>updateMeta("tags",a?(meta.tags||[]).filter(x=>x!==t):[...(meta.tags||[]),t])}/>;})}</div></div>
+    </div>
+  );
+  if(type==="travel") return (
+    <div style={{display:"flex",flexDirection:"column",gap:13}}>
+      <div>
+        <label style={lbl}>Location</label>
+        <input style={inp} value={meta.location||""} onChange={e=>updateMeta("location",e.target.value)} placeholder="City, Country…" onFocus={e=>e.target.style.borderColor=c.accent} onBlur={e=>e.target.style.borderColor=c.border}/>
+        {meta.location&&<a href={`https://maps.google.com?q=${encodeURIComponent(meta.location)}`} target="_blank" rel="noopener noreferrer" style={{display:"inline-flex",alignItems:"center",gap:4,marginTop:5,fontSize:11,color:c.accent,opacity:.8}}>📍 View on map ↗</a>}
+      </div>
+      <div><label style={lbl}>Mood</label><div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{["Radiant","Calm","Anxious","Numb","Energised"].map(m=><Pill key={m} label={m} active={meta.mood===m} onClick={()=>updateMeta("mood",m)}/>)}</div></div>
+    </div>
+  );
+  if(type==="food") return (
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:13}}>
+      <div><label style={lbl}>Meal</label><input style={inp} value={meta.meal||""} onChange={e=>updateMeta("meal",e.target.value)} placeholder="What did you eat?"/></div>
+      <div><label style={lbl}>Before</label><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{["Great","Okay","Low"].map(m=><Pill key={m} label={m} active={meta.moodBefore===m} onClick={()=>updateMeta("moodBefore",m)}/>)}</div></div>
+      <div><label style={lbl}>After</label><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{["Great","Okay","Low"].map(m=><Pill key={m} label={m} active={meta.moodAfter===m} onClick={()=>updateMeta("moodAfter",m)}/>)}</div></div>
+    </div>
+  );
+  if(type==="gratitude") return (
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      {[1,2,3].map(n=>(
+        <div key={n}><label style={lbl}>Grateful for #{n}</label>
+        <input style={inp} value={meta[`gratitude${n}`]||""} onChange={e=>updateMeta(`gratitude${n}`,e.target.value)}
+          placeholder={n===1?"A person who made a difference…":n===2?"Something simple you noticed…":"An experience worth remembering…"}
+          onFocus={e=>e.target.style.borderColor=c.accent} onBlur={e=>e.target.style.borderColor=c.border}/></div>
+      ))}
+    </div>
+  );
+  return null;
+}
+
+// ─── Sketch Canvas ────────────────────────────────────────────────────────────
+function SketchCanvas({ c, canvasRef, brushColor, setBrushColor, brushSize, setBrushSize, tool, setTool, bg, setBg, dm }) {
+  const [drawing,setDrawing]=useState(false);
+  const last=useRef(null);
+  const init=useRef(false);
+  useEffect(()=>{ if(!canvasRef.current||init.current)return; const ctx=canvasRef.current.getContext("2d"); ctx.fillStyle=bg; ctx.fillRect(0,0,canvasRef.current.width,canvasRef.current.height); init.current=true; });
+  const pos=e=>{ const r=canvasRef.current?.getBoundingClientRect(); if(!r)return{x:0,y:0}; const sx=canvasRef.current.width/r.width,sy=canvasRef.current.height/r.height; if(e.touches)return{x:(e.touches[0].clientX-r.left)*sx,y:(e.touches[0].clientY-r.top)*sy}; return{x:(e.clientX-r.left)*sx,y:(e.clientY-r.top)*sy}; };
+  const start=e=>{ e.preventDefault(); setDrawing(true); last.current=pos(e); if(tool==="fill"&&canvasRef.current){const ctx=canvasRef.current.getContext("2d");ctx.fillStyle=brushColor;ctx.fillRect(0,0,canvasRef.current.width,canvasRef.current.height);} };
+  const move=e=>{ e.preventDefault(); if(!drawing||!canvasRef.current||tool==="fill")return; const ctx=canvasRef.current.getContext("2d"); const p=pos(e); ctx.beginPath(); ctx.moveTo(last.current?.x??p.x,last.current?.y??p.y); ctx.lineTo(p.x,p.y); ctx.setLineDash([]); if(tool==="eraser"){ctx.strokeStyle=bg;ctx.lineWidth=brushSize*4;ctx.globalAlpha=1;}else if(tool==="pencil"){ctx.strokeStyle=brushColor;ctx.lineWidth=Math.max(1,brushSize*.6);ctx.globalAlpha=.6;ctx.setLineDash([3,2]);}else if(tool==="brush"){ctx.strokeStyle=brushColor;ctx.lineWidth=brushSize*2.5;ctx.globalAlpha=.4;}else{ctx.strokeStyle=brushColor;ctx.lineWidth=brushSize;ctx.globalAlpha=1;} ctx.lineCap="round";ctx.lineJoin="round";ctx.stroke();ctx.globalAlpha=1;ctx.setLineDash([]);last.current=p; };
+  const stop=()=>setDrawing(false);
+  const clear=()=>{ if(!canvasRef.current)return; const ctx=canvasRef.current.getContext("2d"); ctx.fillStyle=bg; ctx.fillRect(0,0,canvasRef.current.width,canvasRef.current.height); };
+  const changeBg=col=>{ setBg(col); if(!canvasRef.current)return; const ctx=canvasRef.current.getContext("2d"); ctx.fillStyle=col; ctx.fillRect(0,0,canvasRef.current.width,canvasRef.current.height); };
+  const ICONS={pen:"✒",brush:"▓",pencil:"✏",eraser:"⌫",fill:"▪"};
+  const bgPresets=dm?["#1a1916","#0e1a12","#1a1218","#12181e","#1a1610"]:["#f2ede4","#eef4e8","#f4eef2","#eaf0f4","#f4f0e6"];
+  return (
+    <div style={{animation:"fadeIn .2s ease"}}>
+      <div style={{background:c.card,border:`1px solid ${c.border}`,borderRadius:9,padding:"10px 12px",marginBottom:8,display:"flex",flexDirection:"column",gap:8}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+          <div style={{display:"flex",gap:2,background:c.inputBg,borderRadius:7,padding:2}}>
+            {SKETCH_TOOLS.map(t=>(
+              <button key={t} onClick={()=>setTool(t)} title={t} style={{width:32,height:28,borderRadius:5,background:tool===t?c.activeItem:"transparent",border:`1px solid ${tool===t?c.activeBorder:"transparent"}`,color:tool===t?c.accent:c.muted,fontSize:14,cursor:"pointer",transition:"all .12s"}}>{ICONS[t]}</button>
+            ))}
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:6,flex:1}}>
+            <span style={{fontSize:9.5,color:c.muted}}>{brushSize}px</span>
+            <input type="range" min="1" max="50" value={brushSize} onChange={e=>setBrushSize(Number(e.target.value))} style={{flex:1,accentColor:c.accent}}/>
+          </div>
+          <button onClick={clear} style={{padding:"4px 10px",borderRadius:6,border:`1px solid ${c.border}`,background:c.inputBg,color:c.muted,fontSize:10,cursor:"pointer"}}>Clear</button>
+          <button onClick={()=>{ if(!canvasRef.current)return; const a=document.createElement("a");a.download="sketch.png";a.href=canvasRef.current.toDataURL();a.click(); }} style={{padding:"4px 10px",borderRadius:6,border:`1px solid ${c.border}`,background:c.inputBg,color:c.muted,fontSize:10,cursor:"pointer"}}>↓ PNG</button>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <input type="color" value={brushColor} onChange={e=>setBrushColor(e.target.value)} style={{width:24,height:24,border:"none",borderRadius:"50%",cursor:"pointer",background:"transparent",flexShrink:0}}/>
+          <div style={{display:"flex",gap:4,flex:1,flexWrap:"wrap"}}>
+            {PALETTE.map(col=>(
+              <button key={col} onClick={()=>setBrushColor(col)} style={{width:15,height:15,borderRadius:"50%",background:col,border:brushColor===col?`2px solid ${c.accent}`:`1px solid ${c.border}`,cursor:"pointer",flexShrink:0,transition:"transform .1s"}}
+                onMouseEnter={e=>e.currentTarget.style.transform="scale(1.3)"} onMouseLeave={e=>e.currentTarget.style.transform="scale(1)"}/>
+            ))}
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:4,paddingLeft:8,borderLeft:`1px solid ${c.border}`}}>
+            <span style={{fontSize:9,color:c.muted,letterSpacing:".06em"}}>BG</span>
+            {bgPresets.map(col=>(
+              <button key={col} onClick={()=>changeBg(col)} style={{width:13,height:13,borderRadius:3,background:col,border:bg===col?`2px solid ${c.accent}`:`1px solid ${c.border}`,cursor:"pointer",flexShrink:0}}/>
+            ))}
+          </div>
+        </div>
+      </div>
+      <canvas ref={canvasRef} width={1400} height={800}
+        onMouseDown={start} onMouseMove={move} onMouseUp={stop} onMouseLeave={stop}
+        onTouchStart={start} onTouchMove={move} onTouchEnd={stop}
+        style={{width:"100%",border:`1px solid ${c.border}`,borderRadius:9,display:"block",touchAction:"none",cursor:{pen:"crosshair",brush:"cell",pencil:"crosshair",eraser:"cell",fill:"copy"}[tool]||"crosshair"}}/>
+    </div>
+  );
+}
+
+// ─── Art Canvas ───────────────────────────────────────────────────────────────
+function ArtCanvas({ c, canvasRef, brushColor, setBrushColor, brushSize, setBrushSize, journal, onUpdate }) {
+  const [drawing,setDrawing]=useState(false);
+  const last=useRef(null);
+  const pos=e=>{ const r=canvasRef.current?.getBoundingClientRect(); if(!r)return{x:0,y:0}; if(e.touches)return{x:e.touches[0].clientX-r.left,y:e.touches[0].clientY-r.top}; return{x:e.clientX-r.left,y:e.clientY-r.top}; };
+  const start=e=>{ setDrawing(true); last.current=pos(e); };
+  const move=e=>{ if(!drawing||!canvasRef.current)return; const ctx=canvasRef.current.getContext("2d");const p=pos(e);ctx.beginPath();ctx.moveTo(last.current?.x??p.x,last.current?.y??p.y);ctx.lineTo(p.x,p.y);ctx.strokeStyle=brushColor;ctx.lineWidth=brushSize;ctx.lineCap="round";ctx.stroke();last.current=p; };
+  const stop=()=>setDrawing(false);
+  const clear=()=>{ if(!canvasRef.current)return; canvasRef.current.getContext("2d").clearRect(0,0,canvasRef.current.width,canvasRef.current.height); };
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",gap:9,padding:"9px 12px",background:c.card,border:`1px solid ${c.border}`,borderRadius:8,marginBottom:8}}>
+        <input type="color" value={brushColor} onChange={e=>setBrushColor(e.target.value)} style={{width:26,height:26,border:"none",borderRadius:4,cursor:"pointer"}}/>
+        <input type="range" min="1" max="30" value={brushSize} onChange={e=>setBrushSize(Number(e.target.value))} style={{width:90,accentColor:c.accent}}/>
+        <div style={{display:"flex",gap:4,marginLeft:"auto"}}>
+          {PALETTE.slice(0,8).map(col=>(
+            <button key={col} onClick={()=>setBrushColor(col)} style={{width:14,height:14,borderRadius:"50%",background:col,border:brushColor===col?`2px solid ${c.accent}`:`1px solid ${c.border}`,cursor:"pointer",transition:"transform .1s"}}
+              onMouseEnter={e=>e.currentTarget.style.transform="scale(1.3)"} onMouseLeave={e=>e.currentTarget.style.transform="scale(1)"}/>
+          ))}
+        </div>
+        <button onClick={clear} style={{padding:"4px 9px",borderRadius:6,border:`1px solid ${c.border}`,background:c.inputBg,color:c.muted,fontSize:10,cursor:"pointer"}}>Clear</button>
+      </div>
+      <canvas ref={canvasRef} width={800} height={500}
+        onMouseDown={start} onMouseMove={move} onMouseUp={stop} onMouseLeave={stop}
+        onTouchStart={start} onTouchMove={move} onTouchEnd={stop}
+        style={{width:"100%",border:`1px solid ${c.border}`,borderRadius:8,background:c.canvasBg,cursor:"crosshair",display:"block",touchAction:"none"}}/>
+      <textarea placeholder="Describe your artwork…" value={journal.content||""} onChange={e=>onUpdate(journal.id,{content:e.target.value})}
+        style={{width:"100%",marginTop:10,background:"transparent",border:"none",resize:"none",fontSize:14,lineHeight:1.9,color:c.text,fontFamily:"'Lora',serif",minHeight:70}}/>
+    </div>
+  );
+}
+
+// ─── Placeholder helper ───────────────────────────────────────────────────────
+const getPlaceholder = type => ({
+  stream:    "Let the words flow. Don't think, just write…",
+  gratitude: "What moved you today? What are you thankful for?",
+  dream:     "Close your eyes. What did you dream last night?",
+  travel:    "Where are you? What did you see, feel, taste?",
+  food:      "Describe your meal, the flavors, the experience…",
+  art:       "Write about your artwork, your vision, your process…",
+  bullet:    "Start adding tasks and notes…",
+})[type] || "Start writing…";
+
+// ─── Calendar View ────────────────────────────────────────────────────────────
+function CalendarView({ c, journals, setActiveId, setView }) {
+  const [cal, setCal]         = useState(new Date());
+  const [filterType, setFilterType] = useState(null);
+  const year=cal.getFullYear(), month=cal.getMonth();
+  const firstDay=new Date(year,month,1).getDay();
+  const daysInMonth=new Date(year,month+1,0).getDate();
+  const today=ymd();
+
+  const byDay=useMemo(()=>{
+    const m={};
+    journals.filter(j=>!j.archived&&j.content?.trim()).forEach(j=>{
+      const d=ymd(j.updated); if(!m[d])m[d]=[]; m[d].push(j);
+    });
+    return m;
+  },[journals]);
+
+  const writingDays=Object.keys(byDay).filter(d=>d.startsWith(`${year}-${String(month+1).padStart(2,"0")}`)).length;
+
+  return (
+    <div style={{maxWidth:640,margin:"36px auto",padding:"0 24px",animation:"fadeUp .22s ease"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+        <div className="ff-serif" style={{fontSize:30,fontWeight:300,color:c.text}}>{cal.toLocaleDateString("en-US",{month:"long",year:"numeric"})}</div>
+        <div style={{display:"flex",gap:6}}>
+          <Btn v="mb-ghost" onClick={()=>setCal(new Date(year,month-1,1))} style={{padding:"5px 12px",fontSize:13}}>‹</Btn>
+          <Btn v="mb-ghost" onClick={()=>setCal(new Date())} style={{padding:"5px 10px",fontSize:10.5}}>Today</Btn>
+          <Btn v="mb-ghost" onClick={()=>setCal(new Date(year,month+1,1))} style={{padding:"5px 12px",fontSize:13}}>›</Btn>
+        </div>
+      </div>
+
+      {/* Type filter chips */}
+      <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:16}}>
+        <Btn v={`mb-pill mb-ghost${!filterType?" mb-sel":""}`} onClick={()=>setFilterType(null)} style={{fontSize:10}}>All</Btn>
+        {JOURNAL_TYPES.map(t=>(
+          <Btn key={t.id} v={`mb-pill mb-ghost${filterType===t.id?" mb-sel":""}`}
+            onClick={()=>setFilterType(filterType===t.id?null:t.id)}
+            style={{fontSize:10,gap:4}}>
+            <span style={{color:t.color}}>{t.icon}</span>{t.label}
+          </Btn>
+        ))}
+      </div>
+
+      {/* Day-of-week labels */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3,marginBottom:4}}>
+        {["S","M","T","W","T","F","S"].map((d,i)=>(
+          <div key={i} style={{textAlign:"center",fontSize:9,color:c.muted,letterSpacing:".08em",padding:"2px 0"}}>{d}</div>
+        ))}
+      </div>
+
+      {/* Calendar grid */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3}}>
+        {Array.from({length:firstDay},(_,i)=><div key={`e${i}`}/>)}
+        {Array.from({length:daysInMonth},(_,i)=>{
+          const day=i+1;
+          const d=`${year}-${String(month+1).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
+          let entries=(byDay[d]||[]);
+          if(filterType) entries=entries.filter(j=>j.type===filterType);
+          const isToday=d===today, has=entries.length>0;
+          const types=[...new Set(entries.map(j=>j.type))];
+          return (
+            <div key={day} onClick={()=>{if(entries.length){setActiveId(entries[0].id);setView("editor");}}}
+              style={{aspectRatio:"1",borderRadius:7,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:2,
+                cursor:has?"pointer":"default",
+                background:isToday?`${c.accent}20`:has?c.card:"transparent",
+                border:`1px solid ${isToday?c.accent:has?c.borderHov:c.border}`,
+                transition:"all .13s"}}
+              onMouseEnter={e=>{if(has||isToday)e.currentTarget.style.background=`${c.accent}2e`;}}
+              onMouseLeave={e=>{e.currentTarget.style.background=isToday?`${c.accent}20`:has?c.card:"transparent";}}>
+              <div style={{fontSize:12,fontWeight:isToday?600:400,color:isToday?c.accent:has?c.text:c.muted}}>{day}</div>
+              {types.length>0&&(
+                <div style={{display:"flex",gap:2}}>
+                  {types.slice(0,3).map(tid=>{
+                    const t=JOURNAL_TYPES.find(x=>x.id===tid);
+                    return <div key={tid} style={{width:4,height:4,borderRadius:"50%",background:t?.color||c.accent}}/>;
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{marginTop:14,fontSize:11,color:c.muted,textAlign:"center",letterSpacing:".04em"}}>
+        {writingDays} writing day{writingDays!==1?"s":""} this month
+      </div>
+    </div>
+  );
+}
+
+// ─── Heatmap View ─────────────────────────────────────────────────────────────
+function HeatmapView({ c, journals, streak, longestStr }) {
+  const heatmap    = useMemo(()=>buildHeatmap(journals),[journals]);
+  const totalWords = journals.reduce((a,j)=>a+wc(j.content),0);
+  const today      = new Date();
+  const [tooltip,  setTooltip] = useState(null);
+
+  // Build 53 weeks × 7 days, ending today
+  const cells = useMemo(()=>{
+    const arr=[];
+    const start=new Date(today);
+    start.setDate(start.getDate()-(52*7));
+    start.setDate(start.getDate()-start.getDay()); // align to Sunday
+    for(let i=0;i<53*7;i++){
+      const d=new Date(start); d.setDate(start.getDate()+i);
+      if(d>today){arr.push(null);continue;}
+      const key=ymd(d);
+      arr.push({date:key,count:heatmap[key]||0,dom:d.getDate(),month:d.getMonth()});
+    }
+    return arr;
+  },[heatmap]);
+
+  const maxCount=Math.max(...Object.values(heatmap),1);
+
+  const getCellColor=(count)=>{
+    if(!count) return c.inputBg;
+    const t=count/maxCount;
+    return accentRgba(c.accent, t<.25?.2:t<.5?.45:t<.75?.7:1);
+  };
+
+  // Month labels: find first cell of each month
+  const monthLabels=useMemo(()=>{
+    const labels={};
+    cells.forEach((cell,i)=>{
+      if(!cell)return;
+      const col=Math.floor(i/7);
+      if(cell.dom===1||i===0){
+        const name=new Date(cell.date+"T12:00").toLocaleDateString("en-US",{month:"short"});
+        if(!labels[col])labels[col]=name;
+      }
+    });
+    return labels;
+  },[cells]);
+
+  return (
+    <div style={{maxWidth:840,margin:"36px auto",padding:"0 28px 60px",animation:"fadeUp .22s ease"}}>
+      <div className="ff-serif" style={{fontSize:32,fontWeight:300,color:c.text,marginBottom:4}}>Writing Heatmap</div>
+      <div style={{fontSize:12,color:c.muted,marginBottom:26,letterSpacing:".03em"}}>A full year of your writing life</div>
+
+      {/* Stats */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:26}}>
+        {[
+          {l:"Lifetime Words",  v:totalWords.toLocaleString()},
+          {l:"Journals",        v:journals.filter(j=>!j.archived).length},
+          {l:"Current Streak",  v:`${streak}d`, hi:streak>0?"🔥":null},
+          {l:"Longest Streak",  v:`${longestStr}d`},
+        ].map(s=>(
+          <div key={s.l} style={{background:c.card,border:`1px solid ${c.border}`,borderRadius:9,padding:"12px 14px"}}>
+            <div style={{display:"flex",alignItems:"baseline",gap:5}}>
+              <div className="ff-serif" style={{fontSize:26,fontWeight:300,color:c.accent,lineHeight:1}}>{s.v}</div>
+              {s.hi&&<span style={{fontSize:16}}>{s.hi}</span>}
+            </div>
+            <div style={{fontSize:9,color:c.muted,marginTop:3,letterSpacing:".1em",textTransform:"uppercase"}}>{s.l}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Heatmap */}
+      <div style={{background:c.card,border:`1px solid ${c.border}`,borderRadius:10,padding:"18px 18px 14px",overflowX:"auto"}}>
+        {/* Month header row */}
+        <div style={{display:"grid",gridTemplateColumns:`24px repeat(53,12px)`,gap:2,marginBottom:3}}>
+          <div/>
+          {Array.from({length:53},(_,col)=>(
+            <div key={col} style={{fontSize:8,color:c.muted,textAlign:"left",letterSpacing:".02em",overflow:"hidden",whiteSpace:"nowrap"}}>{monthLabels[col]||""}</div>
+          ))}
+        </div>
+
+        {/* Grid with day labels */}
+        <div style={{display:"flex",gap:2}}>
+          {/* Day-of-week labels */}
+          <div style={{display:"grid",gridTemplateRows:"repeat(7,12px)",gap:2,width:22}}>
+            {["S","M","T","W","T","F","S"].map((d,i)=>(
+              <div key={i} style={{fontSize:8,color:i%2===0?"transparent":c.muted,display:"flex",alignItems:"center",justifyContent:"flex-end",paddingRight:2,height:12}}>{d}</div>
+            ))}
+          </div>
+          {/* Cells */}
+          <div style={{display:"grid",gridTemplateColumns:`repeat(53,12px)`,gridTemplateRows:"repeat(7,12px)",gap:2}}>
+            {cells.map((cell,i)=>(
+              cell===null
+                ? <div key={i}/>
+                : <div key={i} className="hm-cell"
+                    style={{width:12,height:12,borderRadius:2,background:getCellColor(cell.count)}}
+                    title={`${cell.date}: ${cell.count} words`}
+                    onMouseEnter={()=>setTooltip(cell)}
+                    onMouseLeave={()=>setTooltip(null)}/>
+            ))}
+          </div>
+        </div>
+
+        {/* Legend */}
+        <div style={{display:"flex",alignItems:"center",gap:5,marginTop:12,justifyContent:"flex-end"}}>
+          <span style={{fontSize:9,color:c.muted}}>Less</span>
+          {[0,.2,.45,.7,1].map((op,i)=>(
+            <div key={i} style={{width:10,height:10,borderRadius:2,background:op===0?c.inputBg:accentRgba(c.accent,op)}}/>
+          ))}
+          <span style={{fontSize:9,color:c.muted}}>More</span>
+        </div>
+
+        {/* Tooltip */}
+        {tooltip&&(
+          <div style={{marginTop:8,fontSize:11,color:c.textSoft,textAlign:"center",letterSpacing:".03em"}}>
+            {tooltip.date} · {tooltip.count} word{tooltip.count!==1?"s":""}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Editor View ──────────────────────────────────────────────────────────────
+function EditorView({ c, journal, onUpdate, focusMode, typewriter, artRef, sketchRef, brushColor, setBrushColor, brushSize, setBrushSize, sketchTool, setSketchTool, sketchBg, setSketchBg, dm, wordGoal }) {
+  const [showMeta, setShowMeta] = useState(false);
+  const [mdMode,   setMdMode]   = useState(false);
+  const [tagOpen,  setTagOpen]  = useState(false);
+  const [tagInput, setTagInput] = useState("");
+  const taRef  = useRef(null);
+  const meta   = journal.meta||{};
+  const tags   = journal.tags||[];
+  const tInfo  = JOURNAL_TYPES.find(t=>t.id===journal.type);
+  const prompt = useMemo(()=>getDailyPrompt(journal.type),[journal.type]);
+  const wcNow  = wc(journal.content);
+
+  const updateMeta = (k,v) => onUpdate(journal.id,{meta:{...meta,[k]:v}});
+  const addTag     = t => { const tag=t.trim().toLowerCase().replace(/\s+/g,"-"); if(tag&&!tags.includes(tag)) onUpdate(journal.id,{tags:[...tags,tag]}); setTagInput(""); };
+  const remTag     = t => onUpdate(journal.id,{tags:tags.filter(x=>x!==t)});
+
+  // Typewriter: keep current line centred
+  useEffect(()=>{
+    if(!typewriter||!taRef.current)return;
+    const el=taRef.current;
+    const fn=()=>{
+      const lh=parseFloat(getComputedStyle(el).lineHeight)||28;
+      const line=el.value.substr(0,el.selectionEnd).split("\n").length;
+      el.scrollTop=(line-1)*lh - el.clientHeight/2 + lh;
+    };
+    el.addEventListener("keyup",fn); el.addEventListener("click",fn);
+    return()=>{ el.removeEventListener("keyup",fn); el.removeEventListener("click",fn); };
+  },[typewriter]);
+
+  const isCanvas = journal.type==="sketch"||journal.type==="art";
+  const isBullet = journal.type==="bullet";
+  const isWriting= !isCanvas&&!isBullet;
+  const showPrompt = isWriting && !journal.content?.trim() && !focusMode;
+
+  return (
+    <div style={{maxWidth:focusMode?660:760,margin:"0 auto",padding:focusMode?"66px 32px":"26px 32px 80px",animation:"fadeUp .2s ease",position:"relative",zIndex:1}}>
+
+      {/* Top meta bar */}
+      {!focusMode&&!isCanvas&&(
+        <div style={{display:"flex",alignItems:"center",flexWrap:"wrap",gap:7,marginBottom:14}}>
+          <span style={{display:"inline-flex",alignItems:"center",gap:5,fontSize:10.5,color:tInfo?.color||c.accent,background:`${tInfo?.color||c.accent}16`,border:`1px solid ${tInfo?.color||c.accent}26`,borderRadius:14,padding:"3px 10px",letterSpacing:".04em"}}>{tInfo?.icon} {tInfo?.label}</span>
+          <span style={{fontSize:10.5,color:c.muted}}>{formatDate(journal.created)}</span>
+          <span style={{fontSize:10.5,color:c.muted,opacity:.6}}>·</span>
+          <span style={{fontSize:10.5,color:c.muted}}>{wcNow} words</span>
+          <div style={{marginLeft:"auto",display:"flex",gap:5}}>
+            {isWriting&&(
+              <Btn v={`mb-ghost${mdMode?" mb-sel":""}`} onClick={()=>setMdMode(m=>!m)} style={{fontSize:10,padding:"3px 8px"}}>{mdMode?"✎ Edit":"◎ Preview"}</Btn>
+            )}
+            <Btn v={`mb-ghost${showMeta?" mb-sel":""}`} onClick={()=>setShowMeta(m=>!m)} style={{fontSize:10,padding:"3px 8px"}}>▼ Fields</Btn>
+            <Btn v={`mb-ghost${tagOpen?" mb-sel":""}`} onClick={()=>setTagOpen(o=>!o)} style={{fontSize:10,padding:"3px 8px"}}>
+              # Tags{tags.length>0?<span style={{color:c.accent,marginLeft:3}}>({tags.length})</span>:null}
+            </Btn>
+          </div>
+        </div>
+      )}
+
+      {/* Tags panel */}
+      {tagOpen&&!focusMode&&(
+        <div style={{display:"flex",alignItems:"center",flexWrap:"wrap",gap:5,marginBottom:14,padding:"9px 12px",background:c.card,border:`1px solid ${c.border}`,borderRadius:8,animation:"fadeUp .14s ease"}}>
+          {tags.map(t=>(
+            <span key={t} style={{display:"inline-flex",alignItems:"center",gap:4,background:`${c.accent}14`,border:`1px solid ${c.accent}26`,borderRadius:14,padding:"3px 10px",fontSize:10.5,color:c.accent}}>
+              #{t}
+              <button onClick={()=>remTag(t)} style={{background:"none",border:"none",color:c.accent,fontSize:12,cursor:"pointer",lineHeight:1,padding:0,opacity:.5}}>×</button>
+            </span>
+          ))}
+          <input value={tagInput} onChange={e=>setTagInput(e.target.value)} placeholder="add tag, Enter"
+            onKeyDown={e=>{if(e.key==="Enter"||e.key===","){e.preventDefault();addTag(tagInput);}if(e.key==="Backspace"&&!tagInput&&tags.length)remTag(tags[tags.length-1]);if(e.key==="Escape")setTagOpen(false);}}
+            style={{background:"transparent",border:"none",fontSize:11,color:c.muted,minWidth:100}}/>
+        </div>
+      )}
+
+      {/* Meta fields */}
+      {showMeta&&!focusMode&&!isCanvas&&(
+        <div style={{background:c.card,border:`1px solid ${c.border}`,borderRadius:9,padding:"16px 16px",marginBottom:16,animation:"fadeUp .14s ease"}}>
+          <MetaFields c={c} type={journal.type} meta={meta} updateMeta={updateMeta}/>
+        </div>
+      )}
+
+      {/* Daily prompt banner — only shown on empty entries */}
+      {showPrompt&&(
+        <div style={{borderRadius:8,padding:"10px 14px",background:`${c.accent}0c`,border:`1px solid ${c.accent}1e`,marginBottom:16,fontFamily:"'Lora',serif",fontStyle:"italic",fontSize:13,color:c.muted,lineHeight:1.6}}>
+          <span style={{fontSize:9,letterSpacing:".1em",textTransform:"uppercase",fontFamily:"'DM Sans',sans-serif",marginRight:8,opacity:.55,fontStyle:"normal"}}>Prompt</span>
+          {prompt}
+        </div>
+      )}
+
+      {/* ── Content area ── */}
+      {journal.type==="sketch"
+        ? <SketchCanvas c={c} canvasRef={sketchRef} brushColor={brushColor} setBrushColor={setBrushColor} brushSize={brushSize} setBrushSize={setBrushSize} tool={sketchTool} setTool={setSketchTool} bg={sketchBg} setBg={setSketchBg} dm={dm}/>
+        : journal.type==="art"
+          ? <ArtCanvas c={c} canvasRef={artRef} brushColor={brushColor} setBrushColor={setBrushColor} brushSize={brushSize} setBrushSize={setBrushSize} journal={journal} onUpdate={onUpdate}/>
+          : journal.type==="bullet"
+            ? <BulletEditor c={c} journal={journal} onUpdate={onUpdate}/>
+            : mdMode
+              ? <div className="mdr" style={{color:c.text}} dangerouslySetInnerHTML={{__html:renderMarkdown(journal.content)}}/>
+              : (
+                <div className={!focusMode&&!typewriter?"ep":""} style={{}}>
+                  <textarea ref={taRef} autoFocus
+                    placeholder={getPlaceholder(journal.type)}
+                    value={journal.content||""}
+                    onChange={e=>onUpdate(journal.id,{content:e.target.value})}
+                    style={{
+                      width:"100%",
+                      minHeight:typewriter?"calc(100vh - 200px)":"calc(100vh - 240px)",
+                      background:"transparent",
+                      border:"none",
+                      resize:"none",
+                      fontSize:focusMode?20:journal.type==="stream"||journal.type==="gratitude"||journal.type==="dream"?17:15,
+                      lineHeight:typewriter?2.4:1.95,
+                      color:c.text,
+                      fontFamily:journal.type==="stream"||journal.type==="gratitude"||journal.type==="dream"
+                        ?"'Lora',Georgia,serif"
+                        :"'DM Sans',system-ui,sans-serif",
+                      fontWeight:400,
+                      paddingTop:typewriter?"38vh":0,
+                      transition:"padding .3s ease",
+                      caretColor:c.accent,
+                      maxWidth:"65ch",
+                      letterSpacing:".005em",
+                    }}/>
+                </div>
+              )
+      }
+    </div>
+  );
+}
